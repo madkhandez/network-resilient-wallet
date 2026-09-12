@@ -91,7 +91,7 @@ The `CHECK (balance >= 0)` constraint is a database-level guarantee against over
 | `recipient_id` | `UUID` | `NOT NULL REFERENCES users(id)` |
 | `amount` | `BIGINT` | `NOT NULL CHECK (amount > 0)` |
 | `notes` | `TEXT` | `DEFAULT ''` |
-| `status` | `VARCHAR(20)` | `NOT NULL` — one of `completed`, `failed` |
+| `status` | `VARCHAR(20)` | `NOT NULL CHECK (status IN ('completed', 'failed'))` |
 | `created_at` | `TIMESTAMPTZ` | `NOT NULL DEFAULT now()` |
 
 ### Indexes
@@ -184,11 +184,9 @@ BEGIN;
 SELECT id, status FROM transfers WHERE idempotency_key = $key;
 → If found: COMMIT, return the existing transfer. Done.
 
--- Step 2: Lock the sender's row to prevent concurrent balance reads.
-SELECT balance FROM users WHERE id = $sender_id FOR UPDATE;
+-- Step 1.5: After acquiring locks, re-check the idempotency key inside the transaction to handle the race where two concurrent requests for the same key both pass the initial check.
 
--- Step 3: Resolve recipient by email.
-SELECT id FROM users WHERE email = $recipient_email FOR UPDATE;
+-- Step 2-3: Lock both the sender and recipient rows using `SELECT ... FOR UPDATE`, in deterministic UUID order (`min(sender_id, recipient_id)` first). This prevents deadlocks when two users transfer to each other concurrently.
 → If not found: ROLLBACK, return 400 "recipient not found".
 → If recipient = sender: ROLLBACK, return 400 "cannot transfer to self".
 
