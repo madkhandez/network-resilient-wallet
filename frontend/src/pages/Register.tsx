@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { apiFetch, ApiError } from '../api';
+import { apiFetch, ApiError, NetworkError } from '../api';
 
 export default function Register() {
   const [email, setEmail] = useState('');
@@ -34,7 +34,7 @@ export default function Register() {
       // Auto login or redirect to login
       navigate('/login');
     } catch (err) {
-      if (err instanceof ApiError) {
+      if (err instanceof ApiError || err instanceof NetworkError) {
         setError(err.message);
       } else {
         setError('Failed to register. Please try again later.');

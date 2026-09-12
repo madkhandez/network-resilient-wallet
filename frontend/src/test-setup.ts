@@ -1,4 +1,5 @@
 import '@testing-library/jest-dom';
+import { beforeEach } from 'vitest';
 
 // Node.js's built-in localStorage (from --localstorage-file) shadows jsdom's 
 // implementation and only supports property access (localStorage['key'] = 'value'),

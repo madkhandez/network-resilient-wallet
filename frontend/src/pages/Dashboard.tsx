@@ -1,4 +1,4 @@
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useQuery, useQueryClient } from '@tanstack/react-query';
 import { apiFetch, ApiError, NetworkError, isOnline } from '../api';
@@ -15,6 +15,7 @@ import {
 import type { PendingTransfer, ServerTransfer } from '../transferQueue';
 
 interface Profile {
+  id: string;
   email: string;
   balance: number;
 }
@@ -45,6 +46,14 @@ export default function Dashboard() {
     queryKey: ['transfers'],
     queryFn: () => apiFetch('/transfers'),
   });
+
+  // --- Clear notifications when online ---
+  useEffect(() => {
+    if (online) {
+      setTransferError('');
+      setTransferSuccess('');
+    }
+  }, [online]);
 
   // --- Logout ---
   const handleLogout = () => {
@@ -133,6 +142,9 @@ export default function Dashboard() {
 
   // --- Manual retry of pending queue ---
   const handleRetryQueue = useCallback(async () => {
+    setTransferError('');
+    setTransferSuccess('');
+
     if (!isOnline()) return;
 
     const { authExpired } = await processQueue();
@@ -276,14 +288,16 @@ export default function Dashboard() {
           <h2>Transfer History</h2>
           {transfers && transfers.length > 0 ? (
             <ul className="transfer-list">
-              {transfers.map((t) => (
+              {transfers.map((t) => {
+                const isSender = profile && t.sender_id === profile.id;
+                return (
                 <li key={t.id} className={`transfer-item transfer-${t.status}`}>
                   <div className="transfer-info">
                     <span className="transfer-direction">
-                      {t.sender_id === '—' ? 'From' : 'To'} {t.recipient_id}
+                      {isSender ? '↑ Sent' : '↓ Received'}
                     </span>
                     <span className="transfer-amount">
-                      ${(t.amount / 100).toFixed(2)}
+                      {isSender ? '−' : '+'}${(t.amount / 100).toFixed(2)}
                     </span>
                   </div>
                   <div className="transfer-meta">
@@ -296,7 +310,8 @@ export default function Dashboard() {
                   </div>
                   {t.notes && <p className="transfer-notes">{t.notes}</p>}
                 </li>
-              ))}
+                );
+              })}
             </ul>
           ) : (
             <p className="empty-state">No transfers yet</p>

@@ -54,7 +54,10 @@ func RegisterHandler(db *pgxpool.Pool) http.HandlerFunc {
 			return
 		}
 
-		_, err = db.Exec(context.Background(),
+		dbCtx, dbCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer dbCancel()
+
+		_, err = db.Exec(dbCtx,
 			"INSERT INTO users (email, password_hash) VALUES ($1, $2)",
 			req.Email, string(hash))
 
@@ -82,8 +85,11 @@ func LoginHandler(db *pgxpool.Pool) http.HandlerFunc {
 
 		req.Email = strings.ToLower(strings.TrimSpace(req.Email))
 
+		dbCtx, dbCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer dbCancel()
+
 		var user User
-		err := db.QueryRow(context.Background(),
+		err := db.QueryRow(dbCtx,
 			"SELECT id, email, password_hash FROM users WHERE email = $1", req.Email).
 			Scan(&user.ID, &user.Email, &user.PasswordHash)
 

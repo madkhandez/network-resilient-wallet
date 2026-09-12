@@ -1,6 +1,6 @@
 import { useState } from 'react';
 import { useNavigate, Link } from 'react-router-dom';
-import { apiFetch, ApiError } from '../api';
+import { apiFetch, ApiError, NetworkError } from '../api';
 
 export default function Login() {
   const [email, setEmail] = useState('');
@@ -24,7 +24,7 @@ export default function Login() {
       localStorage.setItem('last_active', Date.now().toString());
       navigate('/');
     } catch (err) {
-      if (err instanceof ApiError) {
+      if (err instanceof ApiError || err instanceof NetworkError) {
         setError(err.message);
       } else {
         setError('Failed to login. Please try again later.');

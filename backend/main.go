@@ -101,19 +101,25 @@ func connectDB(url string) *pgxpool.Pool {
 }
 
 func initSchema(db *pgxpool.Pool) {
-	schemaPath := "schema.sql" // Root level in Docker, or backend/schema.sql locally
-	if _, err := os.Stat(schemaPath); os.IsNotExist(err) {
-		schemaPath = "../schema.sql" // If ran from backend but schema is in root. Wait, schema.sql is in backend/
+	pathsToTry := []string{
+		"schema.sql",
+		"backend/schema.sql",
+		"../backend/schema.sql",
+		"/app/schema.sql",
 	}
 
-	content, err := os.ReadFile(schemaPath)
-	if err != nil {
-		// fallback to just schema.sql if not found, since Dockerfile copies it to /app/schema.sql
-		content, err = os.ReadFile("/app/schema.sql")
-		if err != nil {
-			log.Printf("Warning: schema.sql not found, skipping schema initialization")
-			return
+	var content []byte
+	var err error
+	for _, p := range pathsToTry {
+		content, err = os.ReadFile(p)
+		if err == nil {
+			break
 		}
+	}
+
+	if err != nil {
+		log.Printf("Warning: schema.sql not found in any standard location, skipping schema initialization")
+		return
 	}
 
 	_, err = db.Exec(context.Background(), string(content))
@@ -132,8 +138,8 @@ func ProfileHandler(db *pgxpool.Pool) http.HandlerFunc {
 
 		var profile ProfileResponse
 		err := db.QueryRow(dbCtx,
-			"SELECT email, balance FROM users WHERE id = $1", userID).
-			Scan(&profile.Email, &profile.Balance)
+			"SELECT id, email, balance FROM users WHERE id = $1", userID).
+			Scan(&profile.ID, &profile.Email, &profile.Balance)
 
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to load profile")
