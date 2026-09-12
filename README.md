@@ -2,6 +2,13 @@
 
 A full-stack wallet application with JWT authentication and fund transfers, designed for reliability under poor network conditions.
 
+## 🌐 Demo & Video Walkthrough
+
+- **Live Demo**: [https://network-resilient-wallet.onrender.com/](https://network-resilient-wallet.onrender.com/)  
+  > ⚠️ **Note**: Hosted on Render's free tier, the server instance may take ~50 seconds to wake up if it is currently sleeping. You can use `test@gmail.com` as the recipient email to test fund transfers.
+
+- **Video Demo / Walkthrough**: [Google Drive Link](https://drive.google.com/drive/folders/1IU1eu6a_erxM67C3XhZ2rdH8vRlvaWIp)
+
 ## Tech Stack
 
 - **Backend**: Go with chi router, pgx/v5 (PostgreSQL driver), golang-jwt
