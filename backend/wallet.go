@@ -1,10 +1,12 @@
 package main
 
 import (
+	"context"
 	"encoding/json"
 	"net/http"
 	"regexp"
 	"strings"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 )
@@ -13,6 +15,10 @@ var uuidRegex = regexp.MustCompile(`^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4
 
 func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
+		// 10-second timeout for database operations (architecture spec)
+		dbCtx, dbCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer dbCancel()
+
 		senderID := r.Context().Value("user_id").(string)
 
 		var req TransferRequest
@@ -48,7 +54,7 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// --- FAST PATH ---
 		var existing Transfer
-		err := pool.QueryRow(r.Context(),
+		err := pool.QueryRow(dbCtx,
 			`SELECT id, idempotency_key, sender_id, recipient_id, amount, notes, status, created_at
              FROM transfers WHERE idempotency_key = $1`, idempotencyKey).
 			Scan(&existing.ID, &existing.IdempotencyKey, &existing.SenderID, &existing.RecipientID,
@@ -65,16 +71,16 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// --- BEGIN TRANSACTION ---
-		tx, err := pool.Begin(r.Context())
+		tx, err := pool.Begin(dbCtx)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to start transaction")
 			return
 		}
-		defer tx.Rollback(r.Context())
+		defer tx.Rollback(dbCtx)
 
 		// Step 1: Resolve recipient
 		var recipientID string
-		err = tx.QueryRow(r.Context(),
+		err = tx.QueryRow(dbCtx,
 			`SELECT id FROM users WHERE email = $1`, req.RecipientEmail).Scan(&recipientID)
 		if err != nil {
 			respondError(w, http.StatusBadRequest, "recipient not found")
@@ -93,13 +99,13 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		var firstBalance, secondBalance int64
-		err = tx.QueryRow(r.Context(),
+		err = tx.QueryRow(dbCtx,
 			`SELECT balance FROM users WHERE id = $1 FOR UPDATE`, firstID).Scan(&firstBalance)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to lock sender")
 			return
 		}
-		err = tx.QueryRow(r.Context(),
+		err = tx.QueryRow(dbCtx,
 			`SELECT balance FROM users WHERE id = $1 FOR UPDATE`, secondID).Scan(&secondBalance)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to lock recipient")
@@ -114,13 +120,13 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Step 3: Re-check idempotency key
-		err = tx.QueryRow(r.Context(),
+		err = tx.QueryRow(dbCtx,
 			`SELECT id, idempotency_key, sender_id, recipient_id, amount, notes, status, created_at
              FROM transfers WHERE idempotency_key = $1`, idempotencyKey).
 			Scan(&existing.ID, &existing.IdempotencyKey, &existing.SenderID, &existing.RecipientID,
 				&existing.Amount, &existing.Notes, &existing.Status, &existing.CreatedAt)
 		if err == nil {
-			tx.Commit(r.Context())
+			tx.Commit(dbCtx)
 			status := http.StatusOK
 			if existing.Status == "failed" {
 				status = http.StatusBadRequest
@@ -133,7 +139,7 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 
 		// Step 4: Check balance
 		if senderBalance < req.Amount {
-			err = tx.QueryRow(r.Context(),
+			err = tx.QueryRow(dbCtx,
 				`INSERT INTO transfers (idempotency_key, sender_id, recipient_id, amount, notes, status)
                  VALUES ($1,$2,$3,$4,$5,'failed')
                  RETURNING id, idempotency_key, sender_id, recipient_id, amount, notes, status, created_at`,
@@ -144,7 +150,7 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 				respondError(w, http.StatusInternalServerError, "Failed to record failed transfer")
 				return
 			}
-			tx.Commit(r.Context())
+			tx.Commit(dbCtx)
 
 			w.Header().Set("Content-Type", "application/json")
 			w.WriteHeader(http.StatusBadRequest)
@@ -153,20 +159,20 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Step 5: Execute transfer
-		_, err = tx.Exec(r.Context(),
+		_, err = tx.Exec(dbCtx,
 			`UPDATE users SET balance = balance - $1 WHERE id = $2`, req.Amount, senderID)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to update sender balance")
 			return
 		}
-		_, err = tx.Exec(r.Context(),
+		_, err = tx.Exec(dbCtx,
 			`UPDATE users SET balance = balance + $1 WHERE id = $2`, req.Amount, recipientID)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to update recipient balance")
 			return
 		}
 
-		err = tx.QueryRow(r.Context(),
+		err = tx.QueryRow(dbCtx,
 			`INSERT INTO transfers (idempotency_key, sender_id, recipient_id, amount, notes, status)
              VALUES ($1,$2,$3,$4,$5,'completed')
              RETURNING id, idempotency_key, sender_id, recipient_id, amount, notes, status, created_at`,
@@ -179,7 +185,7 @@ func TransferHandler(pool *pgxpool.Pool) http.HandlerFunc {
 		}
 
 		// Step 6: Commit
-		err = tx.Commit(r.Context())
+		err = tx.Commit(dbCtx)
 		if err != nil {
 			respondError(w, http.StatusInternalServerError, "Failed to commit transaction")
 			return
@@ -195,7 +201,10 @@ func TransferHistoryHandler(pool *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Context().Value("user_id").(string)
 
-		rows, err := pool.Query(r.Context(),
+		dbCtx, dbCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer dbCancel()
+
+		rows, err := pool.Query(dbCtx,
 			`SELECT id, idempotency_key, sender_id, recipient_id, amount, notes, status, created_at
              FROM transfers
              WHERE sender_id = $1 OR recipient_id = $1

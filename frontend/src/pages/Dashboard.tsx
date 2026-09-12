@@ -1,6 +1,18 @@
+import { useState, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useQuery } from '@tanstack/react-query';
-import { apiFetch, ApiError } from '../api';
+import { useQuery, useQueryClient } from '@tanstack/react-query';
+import { apiFetch, ApiError, NetworkError, isOnline } from '../api';
+import { useNetwork } from '../App';
+import {
+  addPending,
+  updatePending,
+  getQueue,
+  processQueue,
+  reconcile,
+  clearResolved,
+  hasPendingItems,
+} from '../transferQueue';
+import type { PendingTransfer, ServerTransfer } from '../transferQueue';
 
 interface Profile {
   email: string;
@@ -9,46 +21,318 @@ interface Profile {
 
 export default function Dashboard() {
   const navigate = useNavigate();
+  const queryClient = useQueryClient();
+  const { online } = useNetwork();
 
-  const { data: profile, isLoading, error } = useQuery<Profile, ApiError>({
+  // --- Transfer form state ---
+  const [recipientEmail, setRecipientEmail] = useState('');
+  const [amount, setAmount] = useState('');
+  const [notes, setNotes] = useState('');
+  const [transferError, setTransferError] = useState('');
+  const [transferSuccess, setTransferSuccess] = useState('');
+  const [submitting, setSubmitting] = useState(false);
+
+  // --- Pending queue state (re-read from localStorage on each render) ---
+  const pendingItems = getQueue();
+
+  // --- Server data via TanStack Query ---
+  const { data: profile, isLoading: profileLoading, error: profileError, dataUpdatedAt } = useQuery<Profile, ApiError | NetworkError>({
     queryKey: ['profile'],
     queryFn: () => apiFetch('/me'),
   });
 
+  const { data: transfers } = useQuery<ServerTransfer[]>({
+    queryKey: ['transfers'],
+    queryFn: () => apiFetch('/transfers'),
+  });
+
+  // --- Logout ---
   const handleLogout = () => {
     localStorage.removeItem('jwt');
     localStorage.removeItem('last_active');
     navigate('/login');
   };
 
-  if (isLoading) {
-    return <div className="loading">Loading...</div>;
-  }
+  // --- Submit transfer ---
+  const handleTransfer = useCallback(async (e: React.FormEvent) => {
+    e.preventDefault();
+    setTransferError('');
+    setTransferSuccess('');
 
-  if (error) {
-    return (
-      <div className="error-container">
-        <p>Failed to load profile data. Are you offline?</p>
-        <button onClick={handleLogout}>Logout</button>
-      </div>
-    );
+    const amountCents = Math.round(parseFloat(amount) * 100);
+    if (isNaN(amountCents) || amountCents <= 0) {
+      setTransferError('Amount must be greater than zero');
+      return;
+    }
+    if (!recipientEmail.trim()) {
+      setTransferError('Recipient email is required');
+      return;
+    }
+
+    // Generate idempotency key and add to pending queue BEFORE sending
+    const key = addPending(recipientEmail.trim(), amountCents, notes);
+    setSubmitting(true);
+
+    if (!isOnline()) {
+      // Offline — transfer is queued, not sent
+      setTransferSuccess('Transfer queued — will send when connected');
+      setRecipientEmail('');
+      setAmount('');
+      setNotes('');
+      setSubmitting(false);
+      return;
+    }
+
+    try {
+      await apiFetch('/transfers', {
+        method: 'POST',
+        headers: { 'Idempotency-Key': key },
+        body: JSON.stringify({
+          recipient_email: recipientEmail.trim(),
+          amount: amountCents,
+          notes,
+        }),
+      });
+
+      // Server confirmed — update pending item
+      updatePending(key, { status: 'completed' });
+
+      setTransferSuccess('Transfer completed successfully');
+      setRecipientEmail('');
+      setAmount('');
+      setNotes('');
+
+      // Refresh server-authoritative data
+      queryClient.invalidateQueries({ queryKey: ['profile'] });
+      queryClient.invalidateQueries({ queryKey: ['transfers'] });
+    } catch (err) {
+      if (err instanceof ApiError) {
+        if (err.status === 401) {
+          // Auth expired — queue preserved, redirect to login
+          updatePending(key, { status: 'pending' });
+          localStorage.removeItem('jwt');
+          navigate('/login');
+          return;
+        }
+        // Permanent server error (400 = insufficient funds, bad recipient, etc.)
+        updatePending(key, {
+          status: 'permanentFailure',
+          lastError: err.message,
+        });
+        setTransferError(err.message);
+      } else if (err instanceof NetworkError) {
+        // Ambiguous failure — transfer stays pending, will retry
+        setTransferError('Network error — transfer queued for retry');
+      } else {
+        setTransferError('An unexpected error occurred');
+      }
+    } finally {
+      setSubmitting(false);
+    }
+  }, [recipientEmail, amount, notes, navigate, queryClient]);
+
+  // --- Manual retry of pending queue ---
+  const handleRetryQueue = useCallback(async () => {
+    if (!isOnline()) return;
+
+    const { authExpired } = await processQueue();
+    if (authExpired) {
+      localStorage.removeItem('jwt');
+      navigate('/login');
+      return;
+    }
+
+    // Reconcile against server
+    try {
+      const serverTransfers: ServerTransfer[] = await apiFetch('/transfers');
+      reconcile(serverTransfers);
+    } catch {
+      // Best-effort
+    }
+
+    queryClient.invalidateQueries({ queryKey: ['profile'] });
+    queryClient.invalidateQueries({ queryKey: ['transfers'] });
+  }, [navigate, queryClient]);
+
+  // --- Clear resolved items ---
+  const handleClearResolved = () => {
+    clearResolved();
+    // Force re-render by invalidating queries
+    queryClient.invalidateQueries({ queryKey: ['profile'] });
+  };
+
+  // --- Balance display ---
+  const balanceStale = !online || (profileError != null);
+  const balanceDisplay = profile
+    ? `$${(profile.balance / 100).toFixed(2)}`
+    : '—';
+
+  // --- Time since last update ---
+  const lastUpdatedLabel = dataUpdatedAt
+    ? `Last updated: ${new Date(dataUpdatedAt).toLocaleTimeString()}`
+    : '';
+
+  if (profileLoading && !profile) {
+    return <div className="loading">Loading...</div>;
   }
 
   return (
     <div className="dashboard-container">
       <header className="dashboard-header">
-        <h1>Hello {profile?.email}, welcome back</h1>
+        <div className="header-left">
+          <h1>Hello {profile?.email ?? '...'}, welcome back</h1>
+          {!online && (
+            <span className="offline-badge" role="status">⚠ Offline</span>
+          )}
+        </div>
         <button onClick={handleLogout} className="logout-btn">Logout</button>
       </header>
       
       <main className="dashboard-main">
+        {/* --- Balance Card --- */}
         <div className="balance-card">
           <h2>Your Balance</h2>
-          <p className="balance-amount">
-            ${((profile?.balance || 0) / 100).toFixed(2)}
-          </p>
+          <p className="balance-amount">{balanceDisplay}</p>
+          {balanceStale && profile && (
+            <p className="balance-stale">⚠ Balance may be stale — reconnect to refresh</p>
+          )}
+          <p className="balance-updated">{lastUpdatedLabel}</p>
+        </div>
+
+        {/* --- Transfer Form --- */}
+        <div className="transfer-card">
+          <h2>Send Transfer</h2>
+          {transferError && <div className="error-alert">{transferError}</div>}
+          {transferSuccess && <div className="success-alert">{transferSuccess}</div>}
+          <form onSubmit={handleTransfer}>
+            <div className="form-group">
+              <label htmlFor="recipient-email">Recipient Email</label>
+              <input
+                id="recipient-email"
+                type="email"
+                value={recipientEmail}
+                onChange={(e) => setRecipientEmail(e.target.value)}
+                placeholder="recipient@example.com"
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="transfer-amount">Amount ($)</label>
+              <input
+                id="transfer-amount"
+                type="number"
+                step="0.01"
+                min="0.01"
+                value={amount}
+                onChange={(e) => setAmount(e.target.value)}
+                placeholder="0.00"
+                required
+              />
+            </div>
+            <div className="form-group">
+              <label htmlFor="transfer-notes">Notes (optional)</label>
+              <input
+                id="transfer-notes"
+                type="text"
+                value={notes}
+                onChange={(e) => setNotes(e.target.value)}
+                placeholder="What's this for?"
+              />
+            </div>
+            <button type="submit" disabled={submitting} id="submit-transfer">
+              {submitting ? 'Sending...' : (online ? 'Send Transfer' : 'Queue Transfer (Offline)')}
+            </button>
+          </form>
+        </div>
+
+        {/* --- Pending Transfers --- */}
+        {pendingItems.length > 0 && (
+          <div className="pending-card">
+            <div className="pending-header">
+              <h2>Pending Transfers</h2>
+              <div className="pending-actions">
+                {online && hasPendingItems() && (
+                  <button onClick={handleRetryQueue} className="retry-btn" id="retry-queue">
+                    Retry All
+                  </button>
+                )}
+                {pendingItems.some(t => t.status === 'completed' || t.status === 'permanentFailure') && (
+                  <button onClick={handleClearResolved} className="clear-btn">
+                    Clear Resolved
+                  </button>
+                )}
+              </div>
+            </div>
+            <ul className="pending-list">
+              {pendingItems.map((item) => (
+                <PendingTransferItem key={item.idempotencyKey} item={item} />
+              ))}
+            </ul>
+          </div>
+        )}
+
+        {/* --- Transfer History (from server) --- */}
+        <div className="history-card">
+          <h2>Transfer History</h2>
+          {transfers && transfers.length > 0 ? (
+            <ul className="transfer-list">
+              {transfers.map((t) => (
+                <li key={t.id} className={`transfer-item transfer-${t.status}`}>
+                  <div className="transfer-info">
+                    <span className="transfer-direction">
+                      {t.sender_id === '—' ? 'From' : 'To'} {t.recipient_id}
+                    </span>
+                    <span className="transfer-amount">
+                      ${(t.amount / 100).toFixed(2)}
+                    </span>
+                  </div>
+                  <div className="transfer-meta">
+                    <span className={`transfer-status status-${t.status}`}>
+                      {t.status}
+                    </span>
+                    <span className="transfer-date">
+                      {new Date(t.created_at).toLocaleString()}
+                    </span>
+                  </div>
+                  {t.notes && <p className="transfer-notes">{t.notes}</p>}
+                </li>
+              ))}
+            </ul>
+          ) : (
+            <p className="empty-state">No transfers yet</p>
+          )}
         </div>
       </main>
     </div>
+  );
+}
+
+// --- Pending Transfer Item Component ---
+function PendingTransferItem({ item }: { item: PendingTransfer }) {
+  const statusLabel: Record<string, string> = {
+    pending: '⏳ Pending — will send when connected',
+    sending: '📤 Sending...',
+    completed: '✅ Completed',
+    permanentFailure: '❌ Failed',
+  };
+
+  return (
+    <li className={`pending-item pending-${item.status}`}>
+      <div className="pending-info">
+        <span>To: {item.recipientEmail}</span>
+        <span className="pending-amount">${(item.amount / 100).toFixed(2)}</span>
+      </div>
+      <div className="pending-meta">
+        <span className={`pending-status status-${item.status}`}>
+          {statusLabel[item.status] || item.status}
+        </span>
+        {item.retryCount > 0 && (
+          <span className="pending-retries">Retries: {item.retryCount}</span>
+        )}
+      </div>
+      {item.lastError && item.status === 'permanentFailure' && (
+        <p className="pending-error">{item.lastError}</p>
+      )}
+    </li>
   );
 }

@@ -127,8 +127,11 @@ func ProfileHandler(db *pgxpool.Pool) http.HandlerFunc {
 	return func(w http.ResponseWriter, r *http.Request) {
 		userID := r.Context().Value("user_id").(string)
 
+		dbCtx, dbCancel := context.WithTimeout(r.Context(), 10*time.Second)
+		defer dbCancel()
+
 		var profile ProfileResponse
-		err := db.QueryRow(context.Background(),
+		err := db.QueryRow(dbCtx,
 			"SELECT email, balance FROM users WHERE id = $1", userID).
 			Scan(&profile.Email, &profile.Balance)
 
