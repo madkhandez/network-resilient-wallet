@@ -181,7 +181,7 @@ export default function Dashboard() {
 
   // --- Time since last update ---
   const lastUpdatedLabel = dataUpdatedAt
-    ? `Last updated: ${new Date(dataUpdatedAt).toLocaleTimeString()}`
+    ? `Last updated: ${new Date(dataUpdatedAt).toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' })}`
     : '';
 
   if (profileLoading && !profile) {
@@ -189,20 +189,25 @@ export default function Dashboard() {
   }
 
   return (
-    <div className="dashboard-container">
+    <div className={`dashboard-container ${online ? 'dashboard-online' : 'dashboard-offline'}`}>
       <header className="dashboard-header">
         <div className="header-left">
           <h1>Hello {profile?.email ?? '...'}, welcome back</h1>
           {!online && (
-            <span className="offline-badge" role="status">⚠ Offline</span>
+            <span className="offline-badge" role="status">
+              <svg width="12" height="12" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2" strokeLinecap="round" strokeLinejoin="round" style={{marginRight: '4px'}}>
+                <path d="M1 1l22 22M16.72 11.06A10.94 10.94 0 0119 12.55M5 9.86a10.94 10.94 0 00-3.28 2.69M1 12c.9-1.07 1.87-2.07 2.93-3M2 12h.01"></path>
+              </svg>
+              Offline
+            </span>
           )}
         </div>
-        <button onClick={handleLogout} className="logout-btn">Logout</button>
+        <button onClick={handleLogout} className="logout-btn animate-hover">Logout</button>
       </header>
       
       <main className="dashboard-main">
         {/* --- Balance Card --- */}
-        <div className="balance-card">
+        <div className="dashboard-card balance-card animate-hover">
           <h2>Your Balance</h2>
           <p className="balance-amount">{balanceDisplay}</p>
           {balanceStale && profile && (
@@ -212,7 +217,7 @@ export default function Dashboard() {
         </div>
 
         {/* --- Transfer Form --- */}
-        <div className="transfer-card">
+        <div className="dashboard-card transfer-card">
           <h2>Send Transfer</h2>
           {transferError && <div className="error-alert">{transferError}</div>}
           {transferSuccess && <div className="success-alert">{transferSuccess}</div>}
@@ -251,7 +256,7 @@ export default function Dashboard() {
                 placeholder="What's this for?"
               />
             </div>
-            <button type="submit" disabled={submitting} id="submit-transfer">
+            <button type="submit" disabled={submitting} id="submit-transfer" className="animate-hover">
               {submitting ? 'Sending...' : (online ? 'Send Transfer' : 'Queue Transfer (Offline)')}
             </button>
           </form>
@@ -259,17 +264,17 @@ export default function Dashboard() {
 
         {/* --- Pending Transfers --- */}
         {pendingItems.length > 0 && (
-          <div className="pending-card">
+          <div className="dashboard-card pending-card">
             <div className="pending-header">
               <h2>Pending Transfers</h2>
               <div className="pending-actions">
                 {online && hasPendingItems() && (
-                  <button onClick={handleRetryQueue} className="retry-btn" id="retry-queue">
+                  <button onClick={handleRetryQueue} className="retry-btn animate-hover" id="retry-queue">
                     Retry All
                   </button>
                 )}
                 {pendingItems.some(t => t.status === 'completed' || t.status === 'permanentFailure') && (
-                  <button onClick={handleClearResolved} className="clear-btn">
+                  <button onClick={handleClearResolved} className="clear-btn animate-hover">
                     Clear Resolved
                   </button>
                 )}
@@ -284,28 +289,30 @@ export default function Dashboard() {
         )}
 
         {/* --- Transfer History (from server) --- */}
-        <div className="history-card">
-          <h2>Transfer History</h2>
+        <div className="dashboard-card history-card">
+          <div className="history-header">
+            <h2>Transfer History</h2>
+          </div>
           {transfers && transfers.length > 0 ? (
             <ul className="transfer-list">
               {transfers.map((t) => {
                 const isSender = profile && t.sender_id === profile.id;
                 return (
-                <li key={t.id} className={`transfer-item transfer-${t.status}`}>
+                <li key={t.id} className="transfer-item">
                   <div className="transfer-info">
                     <span className="transfer-direction">
                       {isSender ? '↑ Sent' : '↓ Received'}
                     </span>
-                    <span className="transfer-amount">
+                    <span className={`transfer-amount ${!isSender ? 'positive' : ''}`}>
                       {isSender ? '−' : '+'}${(t.amount / 100).toFixed(2)}
                     </span>
                   </div>
                   <div className="transfer-meta">
-                    <span className={`transfer-status status-${t.status}`}>
+                    <span className={`status-badge status-${t.status}`}>
                       {t.status}
                     </span>
                     <span className="transfer-date">
-                      {new Date(t.created_at).toLocaleString()}
+                      {new Date(t.created_at).toLocaleString([], { dateStyle: 'medium', timeStyle: 'short' })}
                     </span>
                   </div>
                   {t.notes && <p className="transfer-notes">{t.notes}</p>}
@@ -325,24 +332,29 @@ export default function Dashboard() {
 // --- Pending Transfer Item Component ---
 function PendingTransferItem({ item }: { item: PendingTransfer }) {
   const statusLabel: Record<string, string> = {
-    pending: '⏳ Pending — will send when connected',
-    sending: '📤 Sending...',
-    completed: '✅ Completed',
-    permanentFailure: '❌ Failed',
+    pending: 'Pending (Offline)',
+    sending: 'Sending...',
+    completed: 'Completed',
+    permanentFailure: 'Failed',
   };
 
   return (
-    <li className={`pending-item pending-${item.status}`}>
+    <li className={`pending-item`}>
       <div className="pending-info">
-        <span>To: {item.recipientEmail}</span>
+        <span className="pending-direction">
+          To:
+          <span className="pending-recipient">{item.recipientEmail}</span>
+        </span>
         <span className="pending-amount">${(item.amount / 100).toFixed(2)}</span>
       </div>
       <div className="pending-meta">
-        <span className={`pending-status status-${item.status}`}>
+        <span className={`status-badge status-${item.status}`}>
           {statusLabel[item.status] || item.status}
         </span>
         {item.retryCount > 0 && (
-          <span className="pending-retries">Retries: {item.retryCount}</span>
+          <span className="pending-retries" style={{fontSize: '0.75rem', color: 'var(--text-secondary)'}}>
+            Retries: {item.retryCount}
+          </span>
         )}
       </div>
       {item.lastError && item.status === 'permanentFailure' && (
